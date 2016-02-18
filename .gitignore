@@ -1,0 +1,17 @@
+# emacs temporary files
+*~
+\#*#
+.#*
+.RData
+.Rhistory
+
+stdout
+
+
+repdata_data_StormData.csv.bz2
+Storm Data Documentation.pdf
+National Climatic Data Center Storm Events FAQ.pdf
+StormDataSimple.tsv
+repdata_data_StormData.csv
+foo.csv
+
