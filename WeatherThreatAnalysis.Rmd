@@ -92,7 +92,8 @@ if (!file.exists(simpleFile)) {
     ## Will reduce 902k observations to 883k
     state50 <- full[ validState, ]
     ## Do not care about the time of day, most seem bogus anyway:
-    days <- format(strptime(state50$BGN_DATE, "%m/%d/%Y %H:%M:%S"), "%Y-%m-%d")
+    state50$Days <- format(strptime(state50$BGN_DATE,
+                                    "%m/%d/%Y %H:%M:%S"), "%Y-%m-%d")
     ## Need to handle the "exponent" for the damage values
     exponentParser <- function(token) {
         if (is.null(token)) return(1)
@@ -123,22 +124,41 @@ if (!file.exists(simpleFile)) {
         ## that claims "115B" in property damage. REMARKS = "The City
         ## of Napa had 600 homes with moderate damage, 150 damaged
         ## businesses with costs of at least $70 million."
-        if (propDamage[r] > 100e9 && state50$REFNUM == 605943) {
+        if (propDamage[r] > 100e9 & state50$REFNUM[r] == 605943) {
             ## Yeah. This is not a tenth of a trillion dollars
             propDamage[r] <- 70e6
         }
         mc <- exponentParser(state50$CROPDMGEXP[r])
         if (mc != 0)  cropDamage[r] <- cropDamage[r] * mc
     }
-    simp <- data.frame(Date     = days,
+    state50$Property <- propDamage
+    state50$Crop     <- cropDamage
+    ## The reference number is very handy for tracing weird data
+    ## points back to their source in the original giant CSV
+    simp <- data.frame(Date     = state50$Days,
                        RawEvent = state50$EVTYPE,
                        Deaths   = state50$FATALITIES,
                        Injuries = state50$INJURIES,
-                       Property = propDamage,
-                       Crop     = cropDamage,
-                       State    = state50$STATE)
+                       Property = state50$Property,
+                       Crop     = state50$Crop,
+                       State    = state50$STATE,
+                       RefNum   = state50$REFNUM )
     write.table( simp, file = simpleFile, sep = "\t", row.names = FALSE,
                 quote = FALSE)
+
+    ## I am finding browsing the Remarks tedious. Copy the big ones to
+    ## their own file.
+    majorEvents <- state50[ propDamage > 100e6 | cropDamage > 100e6 |
+                            state50$FATALITIES > 100 | state50$INJURIES > 500,
+                           c("REFNUM", "Days", "EVTYPE","STATE",
+                             "FATALITIES", "INJURIES", "Property", "Crop",
+                             "REMARKS")]
+    ## Woah. Unescaped newlines in a single CSV record.
+    majorEvents$REMARKS <- gsub("[\n\r]+"," ", majorEvents$REMARKS)
+    remFile <- "MajorEventRemarks.tsv"
+    write.table( majorEvents, file = remFile, sep = "\t", row.names = FALSE,
+                quote = FALSE)
+    
     ## Clean up memory - I think?
     full    <- NULL
     days    <- NULL
@@ -152,7 +172,7 @@ if (!file.exists(simpleFile)) {
 
 ```{r}
 ## Read the simplified data set
-colCls <- c(rep("character", 2), rep("numeric", 4), "character")
+colCls <- c(rep("character", 2), rep("numeric", 4), "character", "numeric")
 data <- read.table(simpleFile, header = TRUE, sep = "\t",
                    colClasses = colCls )
 data$Date  <- strptime(data$Date, "%Y-%m-%d")

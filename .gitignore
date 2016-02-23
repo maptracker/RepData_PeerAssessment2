@@ -13,5 +13,7 @@ Storm Data Documentation.pdf
 National Climatic Data Center Storm Events FAQ.pdf
 StormDataSimple.tsv
 repdata_data_StormData.csv
-foo.csv
+foo*
+# Trying to find out what the 100+ billion dollar flood was:
+flood*
 
