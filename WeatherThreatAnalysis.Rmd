@@ -1,0 +1,486 @@
+
+---
+title: Severe Weather Impact in the United States 
+subtitle: Major health and economic impacts pulled from NOAA Storm Database
+author: "Charles Tilford"
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[LE,RO]{}
+- \fancyfoot[LE,RO]{\thepage}
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+  pdf_document:
+    toc: true
+    toc_depth: 4
+---
+
+## Summary
+    
+This analysis is the [second assignment][Assignment2] of the Coursera
+[Reporducible Research][CourseraRR] class. The data are from the
+[NOAA Storm Dta Publication][StormData] service, provided from a
+[cache on CloudFront][CloudFrontSD] (!47Mb file!). The assignment asks
+that the following two questions be addressed:
+
+1. Across the United States, which types of events (as indicated in
+   the EVTYPE variable) are most harmful with respect to population
+   health?
+   * _Nutshell_: __Heat__ and __tornados__ pose the greatest
+     threat to health, with flooding causing sporadic significant
+     events
+2. Across the United States, which types of events have the greatest
+   economic consequences?
+   * _Nutshell_: __Tornados__ are a significant destoryer of property,
+     but __hurricanes__ and __flooding__ cause immense property
+     damage. Crops are most affected by __drought__, __ice__ and
+     __flooding__, with __hurricanes__ also wreaking occasional major
+     impact.
+
+As this is an educational exercise, I am keeping the vast majority of
+R code visible. In normal circumstances I would suppress it with `echo = FALSE`
+
+## Data Processing
+
+```{r, echo = FALSE, warning = FALSE}
+## Ron's calls to clear the current session, to avoid errors from
+## persisting data structures
+rm(list=ls())
+## Free up memory by forcing garbage collection
+invisible(gc())
+## Pretty printing in knitr
+## Not available in standard repos - https://github.com/yihui/printr
+library(printr)
+## Manually set the seed to an arbitrary number for consistency in reports
+set.seed(1234)
+## Do not convert character vectors to factors unless explicitly indicated
+options(stringsAsFactors=FALSE)
+startTime <- Sys.time()
+
+library("ggplot2")
+library("dplyr")
+library("reshape2")
+library("gridExtra") # For plot layout
+library("ggrepel")   # For automatic geom_text() label management
+
+```
+
+### Simplifying the input data set
+
+The raw data set is large, and includes many fields that are not
+relevant for this analysis. For efficiency while exploring the data a smaller
+derivative file is first made:
+
+```{r}
+simpleFile <- "StormDataSimple.tsv"
+
+if (!file.exists(simpleFile)) {
+    message("Generating simplified data file...")
+    ## Much of the primary file is not of interest to us. Simplify the
+    ## file to just the fields we will use
+    sourceFile <- "repdata_data_StormData.csv.bz2"
+    if (!file.exists(sourceFile)) {
+        url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+        stop(paste("Source data not found. Please download from:",
+                   url, collapse = "\n"))
+    }
+    full <- read.csv(sourceFile)
+    ## Filter the results to just the 50 "standard" states:
+    validState <- full$STATE %in% state.abb
+    ## Will reduce 902k observations to 883k
+    state50 <- full[ validState, ]
+    ## Do not care about the time of day, most seem bogus anyway:
+    days <- format(strptime(state50$BGN_DATE, "%m/%d/%Y %H:%M:%S"), "%Y-%m-%d")
+    ## Need to handle the "exponent" for the damage values
+    exponentParser <- function(token) {
+        if (is.null(token)) return(1)
+        token <- tolower(token)
+        if (token == 'h') {
+            100 # I presume "hundred"?
+        } else if (token == 'k') {
+            1000
+        } else if (token == 'm') {
+            1000000 # million
+        } else if (token == 'b') {
+            1000000000 # billion
+        } else if (grepl('^[1-9]$', token)) {
+            # Presume it is an actual exponent??
+            10 ^ as.integer(token)
+        } else {
+            # No idea. Leave it alone. Stuff like "+" and "-"
+            0
+        }
+    }
+    numrows    <- nrow(state50)
+    propDamage <- state50$PROPDMG
+    cropDamage <- state50$CROPDMG
+    for (r in 1:numrows) {
+        mp <- exponentParser(state50$PROPDMGEXP[r])
+        if (mp != 0)  propDamage[r] <- propDamage[r] * mp
+        ## Ugh. There's a mis-coded entry for a 2006 Napa Valley flood
+        ## that claims "115B" in property damage. REMARKS = "The City
+        ## of Napa had 600 homes with moderate damage, 150 damaged
+        ## businesses with costs of at least $70 million."
+        if (propDamage[r] > 100e9 && state50$REFNUM == 605943) {
+            ## Yeah. This is not a tenth of a trillion dollars
+            propDamage[r] <- 70e6
+        }
+        mc <- exponentParser(state50$CROPDMGEXP[r])
+        if (mc != 0)  cropDamage[r] <- cropDamage[r] * mc
+    }
+    simp <- data.frame(Date     = days,
+                       RawEvent = state50$EVTYPE,
+                       Deaths   = state50$FATALITIES,
+                       Injuries = state50$INJURIES,
+                       Property = propDamage,
+                       Crop     = cropDamage,
+                       State    = state50$STATE)
+    write.table( simp, file = simpleFile, sep = "\t", row.names = FALSE,
+                quote = FALSE)
+    ## Clean up memory - I think?
+    full    <- NULL
+    days    <- NULL
+    state50 <- NULL
+    simp    <- NULL
+    invisible(gc())
+}
+```
+
+### Loading the simplified data
+
+```{r}
+## Read the simplified data set
+colCls <- c(rep("character", 2), rep("numeric", 4), "character")
+data <- read.table(simpleFile, header = TRUE, sep = "\t",
+                   colClasses = colCls )
+data$Date  <- strptime(data$Date, "%Y-%m-%d")
+data$Year  <- as.integer(format(data$Date, "%Y"))
+data$State <- as.factor( data$State )
+```
+
+### Normalizing the Event Type
+
+The raw data are also extremely poorly normalized; There appear to be
+no constraints on event naming, and many events are listed under
+different names or with abbreviation or spelling differences. I have
+made an attempt to normalize the event types progamatically, dealing
+with capitalization (Flood vs FLOOD), whitespace insanity (" WIND" vs
+"WIND") and some simple [stemming][Stemming] (FLOOD, FLOODS,
+FLOODING). I also generated an [alias file](./StormDataAliases.R) that
+manually collects "the same" events under a sensible parent event
+type.
+
+While tedious, these manipulations are extremely helpful in
+concentrating the major impacts from many modest effects into a
+handful of major ones.
+
+```{r}
+## Pull in the aliases - SEE THIS FILE FOR THE ASSIGNMENTS I'VE MADE:
+source("StormDataAliases.R")
+normalEvent <- list()
+stemmedKeys <- list()
+eventRaw    <- unique(data$RawEvent)
+for (e in eventRaw) {
+    ## Nice-case the events. Lowercase and remove non alphanumeric from end:
+    norm <- gsub("[^a-z0-9]$", tolower(e), rep = "")
+    ## Wow. So many spaces
+    norm <- gsub("^ +", norm, rep = "")
+    norm <- gsub(" +$", norm, rep = "")
+    norm <- gsub(" +", norm, rep = " ")
+    ## Uppercase first letter:
+    substr(norm, 1, 1) <- toupper(substr(norm, 1, 1))
+    ## Map over aliases
+    alias <- aliases[[norm]]
+    if (!is.null(alias)) norm <- alias
+    
+    ## Some special-case common classes. Some false positives here
+    if (grepl('tornado', norm, ignore.case = T)) norm <- 'Tornado'
+    if (grepl('hurricane', norm, ignore.case = T)) norm <- 'Hurricane / TS'
+    if (grepl('hail', norm, ignore.case = T)) norm <- 'Ice'
+    if (grepl('\\bice\\b', norm, ignore.case = T)) norm <- 'Ice'
+    if (grepl('snow', norm, ignore.case = T)) norm <- 'Snow'
+    if (grepl('flood', norm, ignore.case = T)) norm <- 'Flood'
+    if (grepl('wind', norm, ignore.case = T)) norm <- 'Wind'
+    
+    ## Deal (crudely) with plurals:
+    key <- gsub("i?e?s+$", norm, rep = "")
+    ## "Costal flooding" -> "Costal flood"
+    key <- gsub("ing$", key, rep = "")
+    if (key == "") key <- "Unknown"
+    ## Keep the first instance of a key as the value to use:
+    if (is.null(stemmedKeys[[ key ]])) stemmedKeys[ key ] <- norm
+    normalEvent[ e ] <- stemmedKeys[[ key ]]
+    ## SOOO much more could be done ... this field is a nightmare
+}
+
+data$Event <- vapply(data$RawEvent, function(x) { normalEvent[[x]] }, "")
+data$Event <- as.factor( data$Event)
+allEvents  <- sort(levels(data$Event))
+
+## Make a melted frame with data aggregated by year and event
+melted <- melt(data, id = c("Year", "Event"), 
+               measure.vars = c("Deaths", "Injuries", "Property", "Crop"))
+annualEvents <- aggregate(value ~ Year + Event + variable,
+                          melted, FUN = sum)
+```
+
+```{r}
+## How many recent years should we consider for the 'top' events?
+numRecentYears   <- 10
+## How many major events should we consider for each category?
+numEventsPerType <- 5
+
+```
+
+### Aggregating the data
+
+There are four casualty categories: Fatalities, Injuries, Property
+Damage and Crop Damage. For each category, find the top
+`r numEventsPerType` events, considering the last `r numRecentYears`
+years.
+
+```{r}
+maxYear    <- max(annualEvents$Year) ## What is the most recent year in data?
+mostRecent <- annualEvents[ annualEvents$Year > maxYear - numRecentYears, ]
+recentSum  <- aggregate( value ~ Event + variable, mostRecent, FUN = sum,
+                     na.rm = TRUE)
+## Eh. Not sure this is an efficient way to go about this...
+recentWide <- reshape(recentSum, idvar = "Event", direction = "wide",
+                      timevar = "variable")
+numEvents  <- nrow(recentWide) ## Total distinct events in full dataset
+## Add rank columns for each of the four categories:
+recentWide <- mutate(recentWide,
+                     rd = numEvents - rank(recentWide$value.Deaths),
+                     ri = numEvents - rank(recentWide$value.Injuries),
+                     rp = numEvents - rank(recentWide$value.Property),
+                     rc = numEvents - rank(recentWide$value.Crop))
+
+## Select just those events that fall into the top ranks
+topEvents <- with( recentWide, {
+    recentWide[ rd < numEventsPerType | ri < numEventsPerType |
+                rp < numEventsPerType | rc < numEventsPerType, ]
+})
+
+## All the top events from the 4 categories:
+topNames <- topEvents$Event
+## Order the events with maximal property damage at top:
+topNames <- as.character(topNames[ order(topEvents$rp, decreasing = FALSE) ])
+
+majorRows   <- annualEvents$Event %in% topNames
+majorEvents <- annualEvents[ majorRows, ]
+
+## What about everything else? How much are we leaving out?
+otherLabel  <- "All Other"
+minorEvents <- annualEvents[ !majorRows, ]
+allMinor    <- aggregate(value ~ Year + variable, minorEvents,
+                         FUN = sum, na.rm = TRUE)
+allMinor$Event <- rep(otherLabel, nrow(allMinor))
+## Add the "other" category to our summary data:
+majorEvents    <- rbind(majorEvents, allMinor)
+majorEvents$Event <- factor(as.character(majorEvents$Event),
+                            levels = c(topNames, otherLabel))
+
+numMajEvents <- length(levels(majorEvents$Event));
+```
+
+## Results
+
+
+```{r}
+## Summarize older data before more detailed reporting occurs.
+## What year do crop damage results start? -> 1993
+cropsSeen <- min(annualEvents[ annualEvents$variable == "Crop" &
+                               annualEvents$value > 0, "Year"])
+## limited data before 1982, just tornado reporting - get mean values
+## for that time.
+oldYear   <- 1983  # From looking at the data
+maxYear   <- max(annualEvents$Year) ## What is the most recent year in data?
+olderData <- with(majorEvents, {
+    majorEvents[ Year < oldYear & Event == "Tornado" & variable != "Crop", ]
+})
+oldTornado <- aggregate( value ~ Event + variable, olderData, mean)
+oldTornado <- reshape(oldTornado, idvar = "Event", direction = "wide",
+                      timevar = "variable")
+recentEvents <- majorEvents[ majorEvents$Year >= oldYear, ]
+```
+
+### Older data (Prior to `r oldYear`)
+
+Crop data are not available until `r cropsSeen`. Limited data are
+available prior to 1980, primarily showing the impact from tornadoes,
+which hold a fairly steady annual average of
+`r as.integer(oldTornado$value.Deaths)` deaths,
+`r as.integer(oldTornado$value.Injuries)` injuries and
+US$`r as.integer(oldTornado$value.Property / 1e6)` million in property
+damage.
+
+### More recent data (`r oldYear` to `r maxYear`)
+
+```{r}
+## Since they use different scales, we will break out injury and
+## damages as separate data structures:
+recInj <- with(majorEvents,
+               majorEvents[Year >= oldYear &
+                           (variable == "Deaths" | variable == "Injuries"), ])
+recDmg <- with(majorEvents,
+               majorEvents[Year >= oldYear &
+                           (variable == "Property" | variable == "Crop"), ])
+
+majTickX <- seq(from = 1950, to = 2010, by = 5) # 5-year major ticks
+minTickX <- 1950:2011
+
+maxInj   <- 2500
+injTickY <- seq(from = 0, to = maxInj, by = 500)
+maxDmg   <- 1e10
+dmgTickY <- seq(from = 0, to = maxDmg, by = 1e9) # Billion dollar ticks
+billions <-function(x) {
+    ## Format dollar amounts as billions
+    ifelse(x == 0, "", sprintf("$%dbn", x / 1e9))
+}
+
+## Out-of-bounds logic:
+oobFunc <- function(points,lim) {
+    ## Huh. I can just pass back the OOB values, and it does what I
+    ## want.  There's probably a string value (eg "as-is" or "keep") I
+    ## can pass, but I got lost in the documentation and gave up looking.
+    points
+    # max <- lim[2]
+    # vapply(points, function(x) { ifelse(x > max, max * 1.1, x) }, 0 )
+}
+
+## First build deaths and injuries:
+injPlot <- ggplot( recInj )  +
+    geom_line( aes(x = Year, y = value, color = Event, linetype = Event)) +
+    scale_linetype_manual(values = rep(c('solid','dashed', "dotted"),
+                                       length.out = numMajEvents),
+                          guide = guide_legend( ncol = 4)) +
+    facet_wrap( "variable", nrow = 1) +
+    scale_x_continuous(breaks = majTickX, minor_breaks = minTickX) +
+    scale_y_continuous(limits = c(0,maxInj), breaks = injTickY,
+                       oob = oobFunc) +
+    ylab("Impacted Individuals") +
+    theme(legend.position=c(0,1), legend.justification=c(0, 1))
+
+
+## Manually annotate the out-of-bounds values
+injOOB <- recInj[ recInj$value > maxInj, ]
+injPlot <- injPlot +
+    geom_point( data = injOOB, aes(x = Year, y = maxInj ), shape = 17) + 
+    geom_text_repel(data = injOOB, show.legend = FALSE,
+                    aes(x = Year, y = maxInj, label = value),
+                    box.padding = unit(0.45, "lines"))
+
+## Now monetary damages:
+dmgPlot <- ggplot( recDmg )  +
+    geom_line( aes(x = Year, y = value, color = Event, linetype = Event)) +
+    scale_color_discrete(guide = FALSE) + # Needed to suppress extra legend
+    scale_linetype_manual(values = rep(c('solid','dashed', "dotted"),
+                                       length.out = numMajEvents),
+                          guide = FALSE ) +
+    facet_wrap( "variable", nrow = 1) +
+    scale_x_continuous(breaks = majTickX, minor_breaks = minTickX) +
+    scale_y_continuous(limits = c(0,maxDmg), breaks = dmgTickY,
+                       label = billions, oob = oobFunc ) +
+    ylab("Damage (US Dollars)")
+
+## Manually annotate the out-of-bounds values
+dmgOOB <- recDmg[ recDmg$value > maxDmg, ]
+## Make the OOB damage values nice:
+bigDmg <- vapply(dmgOOB$value, function(x) sprintf("$%dbn", round(x / 1e9)), "")
+dmgPlot <- dmgPlot +
+    geom_point( data = dmgOOB, aes(x = Year, y = maxDmg ), shape = 17) + 
+    geom_text_repel(data = dmgOOB, show.legend = FALSE,
+                    aes(x = Year, y = maxDmg, label = bigDmg),
+                    box.padding = unit(0.45, "lines"))
+```
+
+__Tornados__ remain a constant threat to both lives and property, even
+when other weather factors are considered, and are the leading cause
+of weather-related injury in a "typical" year. For fatalities,
+__Heat__ appears to be a major contributor, and also is responsible
+for a large share of injury as well.
+
+__Flooding__ (which likely encompass hurricane-related events like
+storm surge) is a sporadic event that does follow a clear trend, but
+can be devestating to property and cause extensive injury. 1998 was a
+particularly bad year for flooding, with over 6400 injuries and $7bn
+in damages. __Hurricanes__ and __Tropical Storms__ (TS) also have the
+potential to inflict billions in damages.
+
+For crops, __Drought__ is unsurprisingly a major, consistent
+threat. Similarly, __Ice__ and __Floods__ are significant
+concerns. __Hurricanes__ can impact crop losses as
+well. Interestingly, while tornados appear prominently in all other
+categories, crops are relatively unaffected, presumably due to the
+highly localized nature of the damage.
+
+```{r fig.width = 9, fig.height = 7}
+grid.arrange(injPlot, dmgPlot,nrow=2)
+
+```
+
+### Alignment with known major weather events.
+
+* The [Great Flood of 1993][flood1993] saw the Mississippi inflict 32
+  fatalities and over $10bn in losses in the Midwest.
+* A major [ice storm in 1994][ice1994] caused hundreds of injuries and
+  billions in losses, including a quarter of Arkansas' pecan industry.
+* The [1995 heat wave][ChicagoHeat] is visible as a major spike in fatalities.
+* In 2005 [Hurricane Katrina][Katrina] wreaked havoc on the eastern
+  seaboard. This is reflected in Hurricane and "Ocean Current" losses
+  of US$93Bn. These values are likely under-estimates of the actual
+  impact.
+* 2011 was an
+  [atypically destructive year for tornadoes][Tornado2011], with
+  nearly US$10bn in property damage. This includes the
+  [Super Outbreak][SuperOutbreak] in late April that claimed 363
+  lives, representing over half the fatalities shown in these data.
+
+### Major Omissions
+
+* Katrina caused over 1000 fatalities in the U.S. alone, but the data
+  reflect only 150 deaths and few injuries for that time. It is
+  possible that delayed casualties (those occuring days after the
+  causative event) are being left out.
+
+## Thoughts on R / ggplot / etc
+
+* I am dissatisfied with ggplot's handling of outlier information. I
+  would have liked to use a broken axis, but this is apparently
+  [frowned upon by ggplot][nobreaksforyou].
+  * Possible in other packages, like [plotrix][plotrix].
+* Wow. The input data have records with un-escaped newlines. The good
+  news is that `read.csv` appears to read these properly. The bad news
+  is that it makes grepping in bash effectively impossible.
+
+## Acknowledgements
+
+* The knitr template is based on one devised by
+  [Ron Ammar](https://github.com/ammarr)
+* Ron was generally helpful, particularly for plaintive requests for
+  advice on ggplot.
+* StackOverflow:
+  * [ggrepel: Automatic handling of nearby geom_text][ggrepelSO]
+  * [Using theme() to place legends inside plot][legendpositionSO]
+  * [Using gridExtra::grid.arrange() to organize ggplots][gridarragnge]
+
+
+[CourseraRR]: https://www.coursera.org/learn/reproducible-research
+[Assignment2]: https://www.coursera.org/learn/reproducible-research/peer/OMZ37/course-project-2
+[StormData]: https://www.ncdc.noaa.gov/oa/climate/sd/
+[StormDataDoc]: https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf
+[CloudFrontSD]: https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2
+[Stemming]: https://en.wikipedia.org/wiki/Stemming
+[ChicagoHeat]: https://en.wikipedia.org/wiki/1995_Chicago_heat_wave
+[Katrina]: https://en.wikipedia.org/wiki/Hurricane_Katrina
+[Tornado2011]: https://en.wikipedia.org/wiki/Tornadoes_of_2011#United_States_yearly_total
+[SuperOutbreak]: https://en.wikipedia.org/wiki/2011_Super_Outbreak
+[ggrepelSO]: https://stackoverflow.com/a/34715743
+[legendpositionSO]: https://stackoverflow.com/a/28818021
+[gridarragnge]: https://stackoverflow.com/a/7997671
+[nobreaksforyou]: https://stackoverflow.com/questions/7194688/using-ggplot2-can-i-insert-a-break-in-the-axis
+[plotrix]: https://stackoverflow.com/questions/24202245/grouped-barplot-with-cut-y-axis
+[ice1994]: http://www.alabamawx.com/?p=5469
+[flood1993]: https://en.wikipedia.org/wiki/Great_Flood_of_1993
