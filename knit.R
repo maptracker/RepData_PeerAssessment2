@@ -1,4 +1,4 @@
 
 library(rmarkdown)
-render("WeatherThreatAnalysis.Rmd")
+render("WeatherThreatAnalysis.Rmd", "all")
 

@@ -21,30 +21,30 @@ output:
     
 This analysis is the [second assignment][Assignment2] of the Coursera
 [Reporducible Research][CourseraRR] class. The data are from the
-[NOAA Storm Dta Publication][StormData] service, provided from a
+[NOAA Storm Data Publication][StormData] service, provided from a
 [cache on CloudFront][CloudFrontSD] (!47Mb file!). The assignment asks
 that the following two questions be addressed:
 
 1. Across the United States, which types of events (as indicated in
    the EVTYPE variable) are most harmful with respect to population
    health?
-   * _Nutshell_: __Heat__ and __tornados__ pose the greatest
-     threat to health, with flooding causing sporadic significant
-     events
+    * _Nutshell_: __Heat__ and __tornadoes__ pose the greatest threat
+      to health, with flooding causing sporadic significant events
 2. Across the United States, which types of events have the greatest
    economic consequences?
-   * _Nutshell_: __Tornados__ are a significant destoryer of property,
-     but __hurricanes__ and __flooding__ cause immense property
-     damage. Crops are most affected by __drought__, __ice__ and
-     __flooding__, with __hurricanes__ also wreaking occasional major
-     impact.
+    * _Nutshell_: __Tornados__ are a constant, significant destoryer
+      of property, but __hurricanes__ and __flooding__ sporadically
+      cause immense property damage. Crops are most affected by
+      __drought__, __ice__ and __flooding__, with __hurricanes__ also
+      wreaking occasional major impact.
 
-As this is an educational exercise, I am keeping the vast majority of
-R code visible. In normal circumstances I would suppress it with `echo = FALSE`
+_As this is an educational exercise, I am keeping the vast majority of
+R code visible. In normal circumstances I would suppress much of it
+with `echo = FALSE`_
 
 ## Data Processing
 
-```{r, echo = FALSE, warning = FALSE}
+```{r include=FALSE}
 ## Ron's calls to clear the current session, to avoid errors from
 ## persisting data structures
 rm(list=ls())
@@ -62,6 +62,7 @@ startTime <- Sys.time()
 library("ggplot2")
 library("dplyr")
 library("reshape2")
+library("maps")
 library("gridExtra") # For plot layout
 library("ggrepel")   # For automatic geom_text() label management
 
@@ -121,11 +122,13 @@ if (!file.exists(simpleFile)) {
         mp <- exponentParser(state50$PROPDMGEXP[r])
         if (mp != 0)  propDamage[r] <- propDamage[r] * mp
         ## Ugh. There's a mis-coded entry for a 2006 Napa Valley flood
-        ## that claims "115B" in property damage. REMARKS = "The City
-        ## of Napa had 600 homes with moderate damage, 150 damaged
-        ## businesses with costs of at least $70 million."
-        if (propDamage[r] > 100e9 & state50$REFNUM[r] == 605943) {
-            ## Yeah. This is not a tenth of a trillion dollars
+        ## that claims "115B" ([B]illion) in property damage. REMARKS
+        ## = "The City of Napa had 600 homes with moderate damage, 150
+        ## damaged businesses with costs of at least $70 million."
+        if (state50$REFNUM[r] == 605943 & propDamage[r]) {
+            ## REFNUM is a unique accessor for the event, but I am
+            ## checking the value as well in case it later gets
+            ## corrected.
             propDamage[r] <- 70e6
         }
         mc <- exponentParser(state50$CROPDMGEXP[r])
@@ -263,7 +266,8 @@ years.
 
 ```{r}
 maxYear    <- max(annualEvents$Year) ## What is the most recent year in data?
-mostRecent <- annualEvents[ annualEvents$Year > maxYear - numRecentYears, ]
+minRecent  <- maxYear - numRecentYears + 1
+mostRecent <- annualEvents[ annualEvents$Year >= minRecent, ]
 recentSum  <- aggregate( value ~ Event + variable, mostRecent, FUN = sum,
                      na.rm = TRUE)
 ## Eh. Not sure this is an efficient way to go about this...
@@ -416,7 +420,7 @@ dmgPlot <- dmgPlot +
                     box.padding = unit(0.45, "lines"))
 ```
 
-__Tornados__ remain a constant threat to both lives and property, even
+__Tornadoes__ remain a constant threat to both lives and property, even
 when other weather factors are considered, and are the leading cause
 of weather-related injury in a "typical" year. For fatalities,
 __Heat__ appears to be a major contributor, and also is responsible
@@ -438,6 +442,81 @@ highly localized nature of the damage.
 
 ```{r fig.width = 9, fig.height = 7}
 grid.arrange(injPlot, dmgPlot,nrow=2)
+
+```
+
+```{r}
+## Organize the information by state, event and impact type for the
+## most recent data.
+stateMelt <- melt(data[data$Year >=minRecent,], id = c("State", "Event"),
+                  measure.vars = c("Deaths", "Injuries", "Property", "Crop"))
+## Collapse 
+byState   <- aggregate(value ~ State + Event + variable, stateMelt, sum)
+names(byState)[3] <- "Impact"
+## Not really needed, but makes exploring easier. Eliminate zeros:
+byState   <- byState[ byState$value > 0, ]
+## For each state and each impact type, what is the major event in recent years?
+allStates <- unique(byState$State)  # should be 50
+allTypes  <- unique(byState$Impact) # should be 4
+aa <- length(allStates) * length(allTypes)
+## Build a blank data frame with all State/Impact combinations:
+maxState <- data.frame(State = rep(allStates, each = length(allTypes)),
+                       Impact = rep(allTypes, times = length(allStates)),
+                       Event  = vector("character", aa),
+                       value  = vector("numeric", aa))
+for (i in seq_len(nrow(maxState))) {
+    ## What are the observed events for this state/impact
+    all <- byState[ byState$State  == maxState$State[i] &
+                    byState$Impact == maxState$Impact[i], c("Event", "value")]
+    ## What's the maximal value?
+    m <- ifelse(nrow(all) == 0, 0, max(all$value, na.rm = TRUE))
+    maxState$value[i] <- m
+    ## What event(s) does that represent?
+    top <- as.character(all[ all$value == m, ][[1]])
+    ## Which of those events were previously reported as a "major" event?
+    tLogi <- top %in% topNames
+    top <- sort(top[ tLogi ])
+    numTop <- length(top)
+    if (numTop == 0) {
+        ## The major impact for this state is not a major category
+        maxState$Event[i] <- otherLabel
+    } else {
+        maxState$Event[i] <- top[1]
+        ## Warn if there were more than one top event. We just pick one
+        if (numTop > 1) message
+        (paste(c("Multiple maximal events",
+                 as.character(maxState$State[i]),
+                 as.character(maxState$Impact[i]), top),
+               collapse = ' | '))
+    }
+}
+
+## For coordinating colors make sure that the levels match those used before:
+maxState$Event <- factor(maxState$Event, levels = levels(majorEvents$Event))
+
+## Need to be able to lookup mapping data by 2-letter abbreviation:
+name2abbr <- data.frame( region = tolower(state.name), State = state.abb)
+states_map <- inner_join(map_data("state"), name2abbr, by = "region")
+## inner_join is needed to keep polygons intact (SO@Richard Careaga)
+maxState$State <- as.character(maxState$State)
+stateImpact <- inner_join(states_map, maxState, by = "State")
+
+us <- ggplot(data = stateImpact,
+             aes(x = long, y = lat, fill = Event, group = group)) +
+    geom_polygon() + facet_wrap( "Impact", nrow = 2)
+
+```
+
+Unsurprisingly, each state is exposed to slightly different weather
+risks. For example, it would be surprising to see blizzards playing a
+major role in Florida fatalities. The maps below higlight the top
+threats in each of the four casuality categories in each of the
+continental 48 states. Only the main national risks are specifically
+highlighted; "All Other" indicates that the primary risk for that
+state falls outside those categories.
+
+```{r fig.width = 9, fig.height = 7}
+us
 
 ```
 
@@ -463,29 +542,49 @@ grid.arrange(injPlot, dmgPlot,nrow=2)
 * Katrina caused over 1000 fatalities in the U.S. alone, but the data
   reflect only 150 deaths and few injuries for that time. It is
   possible that delayed casualties (those occuring days after the
-  causative event) are being left out.
+  causative event) are being left out, even though the NOAA document
+  indicates they should be included (eg injuries from using a kerosene
+  heater due to a power failure)
 
 ## Thoughts on R / ggplot / etc
 
 * I am dissatisfied with ggplot's handling of outlier information. I
   would have liked to use a broken axis, but this is apparently
   [frowned upon by ggplot][nobreaksforyou].
-  * Possible in other packages, like [plotrix][plotrix].
+  + Possible in other packages, like [plotrix][plotrix].
 * Wow. The input data have records with un-escaped newlines. The good
-  news is that `read.csv` appears to read these properly. The bad news
-  is that it makes grepping in bash effectively impossible.
+  news is that `read.csv` appears to read these properly if they are
+  properly quoted. The bad news is that it makes grepping in bash
+  effectively impossible.
+* Scientific notation (eg `1e+6`) appears to always be considered
+  numeric by R, even if there is no decimal (stops on read.table if it
+  occurs in an "integer" column).
 
 ## Acknowledgements
 
 * The knitr template is based on one devised by
-  [Ron Ammar](https://github.com/ammarr)
+  [Ron Ammar](https://github.com/ammarr), particularly the `rmarkdown`
+  header and System Information section.
 * Ron was generally helpful, particularly for plaintive requests for
   advice on ggplot.
 * StackOverflow:
-  * [ggrepel: Automatic handling of nearby geom_text][ggrepelSO]
-  * [Using theme() to place legends inside plot][legendpositionSO]
-  * [Using gridExtra::grid.arrange() to organize ggplots][gridarragnge]
+    * [ggrepel: Automatic handling of nearby geom_text][ggrepelSO] -
+      will "repel" text labels so they don't overlap
+    * [Using theme() to place legends inside plot][legendpositionSO]
+    * [Using gridExtra::grid.arrange() to organize ggplots][gridarragnge] -
+      like `par(mfrow = c(1, 2))` but ggplot-friendly
+    * [Properly merging data with US map][usmap] - `merge` disrupts
+      the polygon order, need to use `inner_join` instead
 
+## System Information
+
+***Time required to process this report:*** *`r format(Sys.time() - startTime)`*
+
+***R session information:***
+
+```{r, echo_session_info}
+  sessionInfo()
+```
 
 [CourseraRR]: https://www.coursera.org/learn/reproducible-research
 [Assignment2]: https://www.coursera.org/learn/reproducible-research/peer/OMZ37/course-project-2
@@ -504,3 +603,4 @@ grid.arrange(injPlot, dmgPlot,nrow=2)
 [plotrix]: https://stackoverflow.com/questions/24202245/grouped-barplot-with-cut-y-axis
 [ice1994]: http://www.alabamawx.com/?p=5469
 [flood1993]: https://en.wikipedia.org/wiki/Great_Flood_of_1993
+[usmap]: https://stackoverflow.com/a/26541278
