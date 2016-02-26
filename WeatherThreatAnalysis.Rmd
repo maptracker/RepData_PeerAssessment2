@@ -22,7 +22,7 @@ output:
 This analysis is the [second assignment][Assignment2] of the Coursera
 [Reporducible Research][CourseraRR] class. The data are from the
 [NOAA Storm Data Publication][StormData] service, provided from a
-[cache on CloudFront][CloudFrontSD] (!47Mb file!). The assignment asks
+[cache on CloudFront][CloudFrontSD] (**47Mb file!!**). The assignment asks
 that the following two questions be addressed:
 
 1. Across the United States, which types of events (as indicated in
@@ -39,8 +39,9 @@ that the following two questions be addressed:
       wreaking occasional major impact.
 
 _As this is an educational exercise, I am keeping the vast majority of
-R code visible. In normal circumstances I would suppress much of it
-with `echo = FALSE`_
+R code visible, rather than suppressing boilerplate. Additionally,
+Coursera wanted the report pushed to RPubs; Our group is auditing and
+self-reviewing, so I will use GitHub Pages instead._
 
 ## Data Processing
 
@@ -59,13 +60,15 @@ set.seed(1234)
 options(stringsAsFactors=FALSE)
 startTime <- Sys.time()
 
+knitr::opts_chunk$set(fig.width = 9, fig.height = 7, fig.path = "figures/", dpi = 150)
+
 library("ggplot2")
 library("dplyr")
 library("reshape2")
 library("maps")
+library("RColorBrewer")
 library("gridExtra") # For plot layout
 library("ggrepel")   # For automatic geom_text() label management
-
 ```
 
 ### Simplifying the input data set
@@ -185,26 +188,27 @@ data$State <- as.factor( data$State )
 
 ### Normalizing the Event Type
 
-The raw data are also extremely poorly normalized; There appear to be
-no constraints on event naming, and many events are listed under
+The raw data are also _extremely_ poorly normalized; There appear to
+be no constraints on event naming, and many events are listed under
 different names or with abbreviation or spelling differences. I have
 made an attempt to normalize the event types progamatically, dealing
 with capitalization (Flood vs FLOOD), whitespace insanity (" WIND" vs
 "WIND") and some simple [stemming][Stemming] (FLOOD, FLOODS,
-FLOODING). I also generated an [alias file](./StormDataAliases.R) that
-manually collects "the same" events under a sensible parent event
-type.
+FLOODING). I also generated an [alias file][gh_alias] that manually
+collects "the same" events under a sensible parent event type. These
+groups are listed in Appendix I.
 
 While tedious, these manipulations are extremely helpful in
-concentrating the major impacts from many modest effects into a
+concentrating the major impacts from many categories into a
 handful of major ones.
 
 ```{r}
-## Pull in the aliases - SEE THIS FILE FOR THE ASSIGNMENTS I'VE MADE:
+## Pull in the alias file:
 source("StormDataAliases.R")
 normalEvent <- list()
 stemmedKeys <- list()
 eventRaw    <- unique(data$RawEvent)
+usedNormal  <- vector("character")
 for (e in eventRaw) {
     ## Nice-case the events. Lowercase and remove non alphanumeric from end:
     norm <- gsub("[^a-z0-9]$", tolower(e), rep = "")
@@ -235,6 +239,7 @@ for (e in eventRaw) {
     ## Keep the first instance of a key as the value to use:
     if (is.null(stemmedKeys[[ key ]])) stemmedKeys[ key ] <- norm
     normalEvent[ e ] <- stemmedKeys[[ key ]]
+    usedNormal <- c(usedNormal, norm)
     ## SOOO much more could be done ... this field is a nightmare
 }
 
@@ -248,6 +253,9 @@ melted <- melt(data, id = c("Year", "Event"),
 annualEvents <- aggregate(value ~ Year + Event + variable,
                           melted, FUN = sum)
 ```
+
+A total of `r length(eventRaw)` EVTYPEs were collapsed to
+`r length(unique(usedNormal))` normalized Event categories.
 
 ```{r}
 ## How many recent years should we consider for the 'top' events?
@@ -305,12 +313,14 @@ allMinor$Event <- rep(otherLabel, nrow(allMinor))
 majorEvents    <- rbind(majorEvents, allMinor)
 majorEvents$Event <- factor(as.character(majorEvents$Event),
                             levels = c(topNames, otherLabel))
-
+## Having trouble finding colors that constrast sufficiently
+## display.brewer.all(length(topNames), colorblindFriendly = TRUE)
+majorColors <- c(brewer.pal(length(topNames), "Paired"), "#999999FF")
+names(majorColors) <- c(topNames, otherLabel)
 numMajEvents <- length(levels(majorEvents$Event));
 ```
 
 ## Results
-
 
 ```{r}
 ## Summarize older data before more detailed reporting occurs.
@@ -359,6 +369,7 @@ maxInj   <- 2500
 injTickY <- seq(from = 0, to = maxInj, by = 500)
 maxDmg   <- 1e10
 dmgTickY <- seq(from = 0, to = maxDmg, by = 1e9) # Billion dollar ticks
+useDashes <- rep(c('solid','dashed'), length.out = numMajEvents)
 billions <-function(x) {
     ## Format dollar amounts as billions
     ifelse(x == 0, "", sprintf("$%dbn", x / 1e9))
@@ -367,18 +378,19 @@ billions <-function(x) {
 ## Out-of-bounds logic:
 oobFunc <- function(points,lim) {
     ## Huh. I can just pass back the OOB values, and it does what I
-    ## want.  There's probably a string value (eg "as-is" or "keep") I
+    ## want.  There is probably a string value (eg "as-is" or "keep") I
     ## can pass, but I got lost in the documentation and gave up looking.
     points
-    # max <- lim[2]
-    # vapply(points, function(x) { ifelse(x > max, max * 1.1, x) }, 0 )
+    ## max <- lim[2]
+    ## vapply(points, function(x) { ifelse(x > max, max * 1.1, x) }, 0 )
 }
 
 ## First build deaths and injuries:
 injPlot <- ggplot( recInj )  +
     geom_line( aes(x = Year, y = value, color = Event, linetype = Event)) +
-    scale_linetype_manual(values = rep(c('solid','dashed', "dotted"),
-                                       length.out = numMajEvents),
+    scale_color_manual(values = majorColors,
+                          guide = guide_legend( ncol = 4)) +
+    scale_linetype_manual(values = useDashes,
                           guide = guide_legend( ncol = 4)) +
     facet_wrap( "variable", nrow = 1) +
     scale_x_continuous(breaks = majTickX, minor_breaks = minTickX) +
@@ -399,9 +411,8 @@ injPlot <- injPlot +
 ## Now monetary damages:
 dmgPlot <- ggplot( recDmg )  +
     geom_line( aes(x = Year, y = value, color = Event, linetype = Event)) +
-    scale_color_discrete(guide = FALSE) + # Needed to suppress extra legend
-    scale_linetype_manual(values = rep(c('solid','dashed', "dotted"),
-                                       length.out = numMajEvents),
+    scale_color_manual(guide = FALSE, values = majorColors) + 
+    scale_linetype_manual(values = useDashes,
                           guide = FALSE ) +
     facet_wrap( "variable", nrow = 1) +
     scale_x_continuous(breaks = majTickX, minor_breaks = minTickX) +
@@ -440,10 +451,12 @@ well. Interestingly, while tornados appear prominently in all other
 categories, crops are relatively unaffected, presumably due to the
 highly localized nature of the damage.
 
-```{r fig.width = 9, fig.height = 7}
+```{r echo=FALSE}
 grid.arrange(injPlot, dmgPlot,nrow=2)
 
 ```
+
+### Major Weather Threats by State
 
 ```{r}
 ## Organize the information by state, event and impact type for the
@@ -494,28 +507,99 @@ for (i in seq_len(nrow(maxState))) {
 ## For coordinating colors make sure that the levels match those used before:
 maxState$Event <- factor(maxState$Event, levels = levels(majorEvents$Event))
 
-## Need to be able to lookup mapping data by 2-letter abbreviation:
-name2abbr <- data.frame( region = tolower(state.name), State = state.abb)
-states_map <- inner_join(map_data("state"), name2abbr, by = "region")
-## inner_join is needed to keep polygons intact (SO@Richard Careaga)
-maxState$State <- as.character(maxState$State)
-stateImpact <- inner_join(states_map, maxState, by = "State")
+if (require("rgdal", quietly = TRUE)) {
+    ## This block allows a very nice hexagonally-abstracted map to be used
+    ## See Acknowlegments for main article, plus links to help install
 
-us <- ggplot(data = stateImpact,
-             aes(x = long, y = lat, fill = Event, group = group)) +
-    geom_polygon() + facet_wrap( "Impact", nrow = 2)
+    ## Because rgdal was a PAIN to install, this is not the default
+    ## map to be drawn. It required a fair bit of tinkering outside of
+    ## R to install the supporting packages
 
+    ## sudo apt-get install libgdal-dev libproj-dev
+
+    shownState <- "50 states"
+    library("rgeos")
+    library("maptools")
+    library("mapproj")
+    ## If you have it, then this code will make nice abstracted US maps:
+    ## Organize regional information by hex map (Rbloggers@hrbrmstr)
+
+    ## Yes, a hexagonal representation messes up some relationships;
+    ## Many east coast states have lost access to the Atlantic, and
+    ## Idaho suddenly has a Pacific coast. The Four Corners states
+    ## must settle for Three Corners. But I think it really helps
+    ## remove a lot of the distraction associated with a fine-grained
+    ## US map.
+    geojason <- "us_states_hexgrid.geojson"
+    if (!file.exists(geojason)) {
+        ## Download the hexagonal map specification:
+        geourl <- "https://andrew.cartodb.com/api/v2/sql?filename=us_states_hexgrid&q=select+*+from+andrew.us_states_hexgrid&format=geojson&bounds=&api_key="
+        download.file(geourl, geojason)
+    }
+    hex <- readOGR("us_states_hexgrid.geojson", "OGRGeoJSON", verbose = FALSE)
+    hex_map <- fortify(hex, region="iso3166_2")
+    hex_map <- inner_join(hex_map, maxState,by = c("id" = "State"))
+
+    #ggplot(data=hex_map, aes(map_id = id, x=long, y=lat)) +
+    #    geom_map(map=hex_map, color="black", fill="white")
+    
+    stateCen <- cbind.data.frame(data.frame(gCentroid(hex, byid=TRUE),
+                                            id = hex@data$iso3166_2))
+    us <- ggplot(hex_map) +
+        geom_map( map = hex_map, color="white", size=0.5,
+                 aes(x=long, y=lat, map_id = id, fill = Event)) +
+        scale_fill_manual(values = majorColors) +
+        facet_wrap( "Impact", nrow = 2)
+    us <- us + geom_text(data= stateCen, aes(label=id, x=x, y=y),
+                         color="white", size=4)
+    ## coord_map() normalizes (somehow) the aspect ratio of the hexagons:
+    us <- us + coord_map()
+} else {
+    ## If we can not get the slick hexagonal map to work, use a
+    ## "normal" map of the lower 48.
+
+    ##Need to be able to lookup mapping data by 2-letter abbreviation:
+    shownState <- "contiguous 48 states"
+    name2abbr <- data.frame( region = tolower(state.name), State = state.abb)
+    states_map <- inner_join(map_data("state"), name2abbr, by = "region")
+    ## inner_join is needed to keep polygons intact (SO@Richard Careaga)
+    maxState$State <- as.character(maxState$State)
+    stateImpact <- inner_join(states_map, maxState, by = "State")
+    
+    us <- ggplot(data = stateImpact,
+                 aes(x = long, y = lat, fill = Event, group = group)) +
+        geom_polygon() + facet_wrap( "Impact", nrow = 2)
+}
+
+## Remove grid styling from around map (Rbloggers@hrbrmstr)
+us <- us + labs(x=NULL, y=NULL) + theme_bw() +
+    ggtitle(sprintf("Major Weather Hazard from %d to %d",minRecent, maxYear)) +
+    theme(panel.border=element_blank()) + theme(panel.grid=element_blank()) +
+    theme(axis.ticks=element_blank()) + theme(axis.text=element_blank())
 ```
 
 Unsurprisingly, each state is exposed to slightly different weather
-risks. For example, it would be surprising to see blizzards playing a
-major role in Florida fatalities. The maps below higlight the top
-threats in each of the four casuality categories in each of the
-continental 48 states. Only the main national risks are specifically
+risks. For example, it would be surprising to see hurricanes playing a
+major role in South Dakota. The maps below higlight the single top
+threat in each of the four casuality categories in each of the
+`r shownState`. Only those risks that are specifically
 highlighted; "All Other" indicates that the primary risk for that
 state falls outside those categories.
 
-```{r fig.width = 9, fig.height = 7}
+While tornadoes are a major threat even when averaged across the
+United States, the injury casualties show them concentrating around
+[Tornado Alley][tornadoalley] in the center of the US. Similarly,
+hurricanes and the effets from ocean currents are localized along the
+east coast and Gulf of Mexico. Flooding appears to be a truly national
+risk for monetary damages, spread extensively across the country.
+
+Intriguingly, ice and cold are generally **not** the major factor in
+Northern states, nor heat for the Southern states (some
+exceptions). This could be beacause these states and their residents
+generally prepare adequately for their lattitude's expected
+temperature extremes.
+
+```{r echo=FALSE}
 us
 
 ```
@@ -551,14 +635,16 @@ us
 * I am dissatisfied with ggplot's handling of outlier information. I
   would have liked to use a broken axis, but this is apparently
   [frowned upon by ggplot][nobreaksforyou].
-  + Possible in other packages, like [plotrix][plotrix].
+    + Possible in other packages, like [plotrix][plotrix].
 * Wow. The input data have records with un-escaped newlines. The good
   news is that `read.csv` appears to read these properly if they are
   properly quoted. The bad news is that it makes grepping in bash
   effectively impossible.
 * Scientific notation (eg `1e+6`) appears to always be considered
-  numeric by R, even if there is no decimal (stops on read.table if it
+  numeric by R, even if there is no decimal (dies on read.table if it
   occurs in an "integer" column).
+* Control of how out-of-bounds values are handled in ggplot is still a
+  mystery to me.
 
 ## Acknowledgements
 
@@ -575,6 +661,26 @@ us
       like `par(mfrow = c(1, 2))` but ggplot-friendly
     * [Properly merging data with US map][usmap] - `merge` disrupts
       the polygon order, need to use `inner_join` instead
+    * [Hexagonal US map layout][hexmap]
+        * [Map layout source][hexsource]
+        * [Installing rgdal][rgdaldebian]
+
+## Appendix I - Event Aliases
+
+```{r include=FALSE}
+aliasMarkdown <- vector("character")
+for (norm in sort(names(aliasGroups))) {
+    raw <- paste(sprintf("`%s`", sort(unique(aliasGroups[[norm]]))),
+                 collapse = ", ")
+    aliasMarkdown <- c(aliasMarkdown, sprintf("+ **%s:** %s\n", norm, raw))
+}
+```
+
+These aliases were manually defined. In addition to the list below,
+regular expressions were used to assign events to Tornado, Hurricane /
+TS, Ice, Snow, Flood and Wind.
+
+`r paste(aliasMarkdown, collapse = "")`
 
 ## System Information
 
@@ -604,3 +710,8 @@ us
 [ice1994]: http://www.alabamawx.com/?p=5469
 [flood1993]: https://en.wikipedia.org/wiki/Great_Flood_of_1993
 [usmap]: https://stackoverflow.com/a/26541278
+[hexmap]: http://www.r-bloggers.com/geojson-hexagonal-statebins-in-r/
+[hexsource]: https://team.cartodb.com/u/andrew/tables/andrew.us_states_hexgrid/public/map
+[rgdaldebian]: https://stackoverflow.com/questions/15248815/rgdal-package-installation
+[tornadoalley]: https://en.wikipedia.org/wiki/Tornado_Alley
+[gh_alias]: https://github.com/maptracker/RepData_PeerAssessment2/blob/master/StormDataAliases.R

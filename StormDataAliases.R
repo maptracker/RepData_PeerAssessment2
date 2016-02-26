@@ -123,3 +123,11 @@ aliases <- list(
     "Rain" = "Rain",
     "Heavy rain" = "Rain"
     )
+
+
+## Reverse lookup
+aliasGroups <- list()
+for (raw in names(aliases)) {
+    norm <- aliases[[raw]]
+    aliasGroups[[norm]] <- c(aliasGroups[[norm]], raw)
+}
